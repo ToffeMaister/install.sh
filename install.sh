@@ -13,28 +13,23 @@ MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
 read -sp "Enter password for $USERNAME: " USER_PASS; echo
 read -sp "Enter password for root: " ROOT_PASS; echo
 
-### NETWORK (LIVE ISO ONLY) ###
-log "Starting installer network..."
-systemctl start NetworkManager || true
-
 ### DISK SELECTION ###
 INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME || true)
 lsblk -dpno NAME,SIZE,MODEL | grep disk | grep -v "$INSTALLER_USB"
 
 read -rp "Disk to ERASE (e.g. /dev/nvme0n1): " DISK
-[[ -b "$DISK" ]] || { echo "Invalid disk"; exit 1; }
+[[ -b "$DISK" ]] || exit 1
 
 echo "⚠️ ALL DATA ON $DISK WILL BE LOST"
 read -rp "Type YES to confirm: " CONFIRM
 [[ "$CONFIRM" == "YES" ]] || exit 1
 
 ### PARTITIONING ###
-log "Partitioning..."
 sgdisk --zap-all "$DISK"
 sgdisk -n 1:0:+1G -t 1:EF00 "$DISK"
 sgdisk -n 2:0:0   -t 2:8300 "$DISK"
-
 udevadm settle
+
 [[ "$DISK" =~ nvme ]] && P="p" || P=""
 EFI="${DISK}${P}1"
 ROOT="${DISK}${P}2"
@@ -58,23 +53,82 @@ mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log
 mount -o umask=0077 "$EFI" /mnt/boot
 
 ### MIRRORS ###
-log "Updating mirrors..."
 sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
-pacman -Sy --noconfirm reflector
+pacman -S --noconfirm reflector
 reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist
 
-### PACSTRAP ###
-log "Installing base system..."
+### INSTALL ###
 pacstrap -K /mnt \
   base base-devel linux-zen linux-zen-headers linux-firmware amd-ucode \
   sudo vim nano git wget \
-  networkmanager btrfs-progs snapper \
+  networkmanager \
+  btrfs-progs snapper \
   pipewire pipewire-alsa pipewire-pulse \
   plasma-meta sddm konsole dolphin firefox \
   nvidia-open-dkms nvidia-utils lib32-nvidia-utils nvidia-settings
 
-### VERIFY NETWORKMANAGER ###
-if [[ ! -f /mnt/usr/lib/systemd/system/NetworkManager.service ]]; then
+### VERIFY INSTALL INTEGRITY ###
+for f in \
+  /mnt/usr/lib/systemd/system/NetworkManager.service \
+  /mnt/usr/lib/systemd/system/sddm.service
+do
+  [[ -f "$f" ]] || { echo "❌ Missing $f — pacstrap failed"; exit 1; }
+done
+
+### FSTAB ###
+genfstab -U /mnt > /mnt/etc/fstab
+
+### ZRAM ###
+cat > /mnt/etc/systemd/zram-generator.conf <<EOF
+[zram0]
+zram-size = $ZRAM_SIZE
+compression-algorithm = zstd
+EOF
+
+### CONFIG ###
+arch-chroot /mnt /bin/bash <<EOF
+set -e
+
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+echo "sv_SE.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+echo "$HOSTNAME" > /etc/hostname
+echo "KEYMAP=se-latin1" > /etc/vconsole.conf
+
+echo "root:$ROOT_PASS" | chpasswd
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$USER_PASS" | chpasswd
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
+chmod 440 /etc/sudoers.d/wheel
+
+sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+mkinitcpio -P
+
+bootctl install
+PARTUUID=\$(blkid -s PARTUUID -o value "$ROOT")
+
+cat > /boot/loader/entries/arch.conf <<EOT
+title Arch Linux (Zen)
+linux /vmlinuz-linux-zen
+initrd /amd-ucode.img
+initrd /initramfs-linux-zen.img
+options root=PARTUUID=\$PARTUUID rw rootflags=subvol=@ quiet nvidia_drm.modeset=1
+EOT
+EOF
+
+### ENABLE SERVICES (SAFE) ###
+systemctl --root=/mnt enable NetworkManager
+systemctl --root=/mnt enable sddm
+systemctl --root=/mnt enable systemd-resolved
+
+### DONE ###
+umount -R /mnt
+log "✅ Installation complete. Reboot."if [[ ! -f /mnt/usr/lib/systemd/system/NetworkManager.service ]]; then
   echo "❌ NetworkManager.service missing — pacstrap failed"
   exit 1
 fi
@@ -542,6 +596,7 @@ trace "Unmounting target filesystem..."
 umount -R /mnt || true
 
 trace "Installation finished. Reboot when ready."
+
 
 
 
