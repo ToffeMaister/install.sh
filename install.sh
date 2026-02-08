@@ -1,132 +1,143 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- 1. CONFIGURATION ---
-TIMEZONE="Europe/Stockholm"
-HOSTNAME="overlord"
-USER_NAME="toffe"
-ZRAM_SIZE="16G"
-MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
+log() { echo -e "\n[$(date +%H:%M:%S)] $*"; }
 
-# Capture passwords once at the start
-read -sp "Enter password for $USER_NAME: " USER_PASS; echo
-read -sp "Enter password for root: " ROOT_PASS; echo
+### 1. CONFIGURATION ###
+TIMEZONE="Europe/Stockholm" 
+HOSTNAME="overlord" 
+USERNAME="toffe" 
+ZRAM_SIZE="16G" 
+MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2" 
 
-# --- 2. DISK PREPARATION ---
-echo "Available Disks:"
-lsblk -dno NAME,SIZE,MODEL
-read -rp "Enter disk name (e.g., nvme0n1 or sda): " DISK_NAME
-DISK="/dev/$DISK_NAME"
+# Capture passwords early
+read -sp "Enter password for $USERNAME: " USER_PASS; echo 
+read -sp "Enter password for root: " ROOT_PASS; echo 
 
-# Wipe and Partition
-sgdisk --zap-all "$DISK"
-sgdisk -n 1:0:+1G -t 1:EF00 -c 1:"boot"
-sgdisk -n 2:0:0   -t 2:8300 -c 2:"root"
-udevadm settle
+### 2. DISK SELECTION ###
+INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME || true) 
+lsblk -dpno NAME,SIZE,MODEL | grep disk | grep -v "$INSTALLER_USB" 
 
-# Identify partitions (NVMe vs SATA)
-[[ "$DISK" =~ nvme ]] && P="p" || P=""
-EFI_PART="${DISK}${P}1"
-ROOT_PART="${DISK}${P}2"
+read -rp "Disk to ERASE (e.g. /dev/nvme0n1): " DISK 
+[[ -b "$DISK" ]] || exit 1 
 
-# Format
-mkfs.fat -F32 "$EFI_PART"
-mkfs.btrfs -f "$ROOT_PART"
+echo "⚠️ ALL DATA ON $DISK WILL BE LOST" 
+read -rp "Type YES to confirm: " CONFIRM 
+[[ "$CONFIRM" == "YES" ]] || exit 1 
 
-# --- 3. BTRFS SUBVOLUMES ---
-mount "$ROOT_PART" /mnt
-btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
-btrfs subvolume create /mnt/@var_log
-umount /mnt
+### 3. PARTITIONING & FORMATTING ###
+sgdisk --zap-all "$DISK" 
+sgdisk -n 1:0:+1G -t 1:EF00 "$DISK" 
+sgdisk -n 2:0:0   -t 2:8300 "$DISK" 
+udevadm settle 
 
-# Mount subvolumes with optimization 
-mount -o subvol=@,"$MOUNT_OPTS" "$ROOT_PART" /mnt
-mkdir -p /mnt/{boot,home,var/log}
-mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT_PART" /mnt/home
-mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT_PART" /mnt/var/log
-mount -o umask=0077 "$EFI_PART" /mnt/boot
+[[ "$DISK" =~ nvme ]] && P="p" || P="" 
+EFI="${DISK}${P}1" 
+ROOT="${DISK}${P}2" 
 
-# --- 4. BASE INSTALLATION ---
-# Enable multilib for NVIDIA [cite: 4]
-sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
+mkfs.fat -F32 "$EFI" 
+mkfs.btrfs -f "$ROOT" 
 
-# Pacstrap includes Firefox and NVIDIA drivers [cite: 1, 4]
+### 4. BTRFS SUBVOLUMES & MOUNTING ###
+mount "$ROOT" /mnt 
+btrfs subvolume create /mnt/@ 
+btrfs subvolume create /mnt/@home 
+btrfs subvolume create /mnt/@snapshots 
+btrfs subvolume create /mnt/@var_log 
+umount /mnt 
+
+mount -o subvol=@,"$MOUNT_OPTS" "$ROOT" /mnt 
+mkdir -p /mnt/{boot,home,.snapshots,var/log} 
+mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT" /mnt/home 
+mount -o subvol=@snapshots,"$MOUNT_OPTS" "$ROOT" /mnt/.snapshots 
+mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log 
+mount -o umask=0077 "$EFI" /mnt/boot 
+
+### 5. BASE INSTALLATION ###
+sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf 
+pacman -Sy --noconfirm reflector 
+reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist 
+
 pacstrap -K /mnt \
   base base-devel linux-zen linux-zen-headers linux-firmware amd-ucode \
-  sudo nano networkmanager btrfs-progs \
-  nvidia-open-dkms nvidia-utils lib32-nvidia-utils \
-  plasma-meta sddm konsole dolphin firefox git wget
+  sudo vim nano git wget \
+  networkmanager btrfs-progs snapper \
+  pipewire pipewire-alsa pipewire-pulse \
+  plasma-meta sddm konsole dolphin \
+  nvidia-open-dkms nvidia-utils lib32-nvidia-utils nvidia-settings 
 
-# Generate mount table [cite: 1, 3]
-genfstab -U /mnt >> /mnt/etc/fstab
+### 6. SYSTEM CONFIGURATION ###
+genfstab -U /mnt > /mnt/etc/fstab 
 
-# Write ZRAM config 
 cat > /mnt/etc/systemd/zram-generator.conf <<EOF
 [zram0]
 zram-size = $ZRAM_SIZE
 compression-algorithm = zstd
-EOF
+EOF 
 
-# --- 5. SYSTEM CONFIGURATION (CHROOT) ---
-export TIMEZONE HOSTNAME USER_NAME ROOT_PASS USER_PASS ROOT_PART
+export TIMEZONE HOSTNAME USERNAME ROOT_PASS USER_PASS ROOT 
 
-arch-chroot /mnt /bin/bash <<'EOF'
+arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
 
-# Localization
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
-hwclock --systohc
-echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
-locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "$HOSTNAME" > /etc/hostname
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime 
+hwclock --systohc 
 
-# User Setup [cite: 4]
-echo "root:$ROOT_PASS" | chpasswd
-useradd -m -G wheel,storage,power -s /bin/bash "$USER_NAME"
-echo "$USER_NAME:$USER_PASS" | chpasswd
-echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen 
+echo "sv_SE.UTF-8 UTF-8" >> /etc/locale.gen 
+locale-gen 
+echo "LANG=en_US.UTF-8" > /etc/locale.conf 
 
-# Enable Services [cite: 4]
-systemctl enable NetworkManager
-systemctl enable sddm
+echo "$HOSTNAME" > /etc/hostname 
+echo "KEYMAP=se-latin1" > /etc/vconsole.conf 
 
-# Hardware Optimization: NVIDIA Initramfs & Modesetting [cite: 4]
-sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
-mkinitcpio -P
+echo "root:$ROOT_PASS" | chpasswd 
+useradd -m -G wheel -s /bin/bash "$USERNAME" 
+echo "$USERNAME:$USER_PASS" | chpasswd 
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel 
+chmod 440 /etc/sudoers.d/wheel 
 
-# NVIDIA Update Hook
-mkdir -p /etc/pacman.d/hooks
+# NVIDIA Configuration
+sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf 
+mkinitcpio -P 
+
+# NVIDIA Hook Implementation
+mkdir -p /etc/pacman.d/hooks 
 cat > /etc/pacman.d/hooks/nvidia.hook <<HOOK
 [Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = nvidia-open-dkms
-Target = nvidia-utils
-Target = linux-zen
-[Action]
-Description = Update Nvidia module in initcpio
-Depends = mkinitcpio
-When = PostTransaction
-Exec = /usr/bin/mkinitcpio -P
-HOOK
+Operation=Install
+Operation=Upgrade
+Operation=Remove
+Type=Package
+Target=nvidia
 
-# Bootloader (systemd-boot) [cite: 4]
-bootctl install
-PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_PART")
+[Action]
+Depends=mkinitcpio
+When=PostTransaction
+Exec=/usr/bin/mkinitcpio -P
+HOOK 
+
+# Bootloader
+bootctl install 
+PARTUUID=\$(blkid -s PARTUUID -o value "$ROOT") 
+
+cat > /boot/loader/loader.conf <<EOT
+default arch.conf
+timeout 3
+editor no
+EOT 
 
 cat > /boot/loader/entries/arch.conf <<EOT
 title Arch Linux (Zen)
 linux /vmlinuz-linux-zen
 initrd /amd-ucode.img
 initrd /initramfs-linux-zen.img
-options root=PARTUUID=$PARTUUID rw rootflags=subvol=@ nvidia-drm.modeset=1 quiet
-EOT
+options root=PARTUUID=\$PARTUUID rw rootflags=subvol=@ quiet nvidia_drm.modeset=1
+EOT 
+
+systemctl enable NetworkManager sddm systemd-resolved 
 EOF
 
-# --- 6. FINISH ---
-umount -R /mnt
-echo "✅ Done! Type 'reboot' and Firefox will be available on your desktop."
+### 7. FINISH ###
+umount -R /mnt 
+log "✅ Installation complete. Reboot."
