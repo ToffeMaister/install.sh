@@ -1,68 +1,68 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple timestamped logger
-trace() { printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
+# -------------------------
+# Logger
+# -------------------------
+log() { echo -e "\n[$(date +%H:%M:%S)] $*"; }
 
 # -------------------------
 # Configuration
 # -------------------------
 TIMEZONE="Europe/Stockholm"
-USER_NAME="toffe"
 HOSTNAME="overlord"
-MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
+USERNAME="toffe"
 ZRAM_SIZE="16G"
+MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
 
-# Prompt for passwords
-read -sp "Enter password for $USER_NAME: " USER_PASS; echo
+# -------------------------
+# Passwords
+# -------------------------
+read -sp "Enter password for $USERNAME: " USER_PASS; echo
 read -sp "Enter password for root: " ROOT_PASS; echo
 
 # -------------------------
-# Preflight & Disk selection
+# Network
 # -------------------------
-trace "Starting network services..."
-systemctl start systemd-resolved 2>/dev/null || true
-systemctl start NetworkManager 2>/dev/null || true
+log "Starting network services..."
+systemctl start NetworkManager || true
 
-INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME 2>/dev/null || true)
-[ -z "${INSTALLER_USB:-}" ] && INSTALLER_USB="none"
+# -------------------------
+# Disk selection
+# -------------------------
+INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME || true)
 
-echo "-------------------------------------------------------"
-echo "AVAILABLE DISKS (Installer USB: /dev/$INSTALLER_USB)"
-lsblk -dpno NAME,SIZE,MODEL,TYPE | grep "disk" | grep -v "$INSTALLER_USB" || true
-echo "-------------------------------------------------------"
+echo "Available disks:"
+lsblk -dpno NAME,SIZE,MODEL | grep disk | grep -v "$INSTALLER_USB"
 
-read -rp "Enter the FULL PATH of the disk to ERASE (e.g., /dev/nvme0n1): " DISK
-if [[ ! -b "$DISK" ]]; then
-  echo "Error: $DISK is not a valid block device." >&2
-  exit 1
-fi
+read -rp "Enter disk to ERASE (example: /dev/nvme0n1): " DISK
+[[ -b "$DISK" ]] || { echo "Invalid disk"; exit 1; }
 
-echo "⚠️  WARNING: ALL DATA ON $DISK WILL BE PERMANENTLY DELETED!"
-read -rp "Type YES to confirm: " confirm
-[[ "$confirm" == "YES" ]] || exit 1
+echo "⚠️  ALL DATA ON $DISK WILL BE LOST"
+read -rp "Type YES to confirm: " CONFIRM
+[[ "$CONFIRM" == "YES" ]] || exit 1
 
 # -------------------------
 # Partitioning
 # -------------------------
-trace "Partitioning $DISK..."
+log "Partitioning disk..."
 sgdisk --zap-all "$DISK"
-sgdisk -n 1:0:+1024M -t 1:EF00 "$DISK"   # EFI
-sgdisk -n 2:0:0 -t 2:8300 "$DISK"         # Root
+sgdisk -n 1:0:+1G -t 1:EF00 "$DISK"
+sgdisk -n 2:0:0   -t 2:8300 "$DISK"
 
 udevadm settle
-if [[ "$DISK" =~ nvme ]]; then P="p"; else P=""; fi
-EFI_PART="${DISK}${P}1"
-MAIN_PART="${DISK}${P}2"
+[[ "$DISK" =~ nvme ]] && P="p" || P=""
+EFI="${DISK}${P}1"
+ROOT="${DISK}${P}2"
 
-mkfs.fat -F32 "$EFI_PART"
-mkfs.btrfs -f "$MAIN_PART"
+mkfs.fat -F32 "$EFI"
+mkfs.btrfs -f "$ROOT"
 
 # -------------------------
 # Btrfs subvolumes
 # -------------------------
-trace "Creating Btrfs subvolumes..."
-mount "$MAIN_PART" /mnt
+log "Creating Btrfs subvolumes..."
+mount "$ROOT" /mnt
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
 btrfs subvolume create /mnt/@snapshots
@@ -70,12 +70,105 @@ btrfs subvolume create /mnt/@var_log
 umount /mnt
 
 # -------------------------
-# Mount subvolumes
+# Mount layout
 # -------------------------
-trace "Mounting Btrfs subvolumes..."
-mount -o subvol=@,"$MOUNT_OPTS" "$MAIN_PART" /mnt
+log "Mounting filesystem..."
+mount -o subvol=@,"$MOUNT_OPTS" "$ROOT" /mnt
 mkdir -p /mnt/{boot,home,.snapshots,var/log}
-mount -o subvol=@home,"$MOUNT_OPTS" "$MAIN_PART" /mnt/home
+mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT" /mnt/home
+mount -o subvol=@snapshots,"$MOUNT_OPTS" "$ROOT" /mnt/.snapshots
+mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log
+mount -o umask=0077 "$EFI" /mnt/boot
+
+# -------------------------
+# Mirrors
+# -------------------------
+log "Updating mirrors..."
+sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
+pacman -Sy --noconfirm reflector
+reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist
+
+# -------------------------
+# Base install
+# -------------------------
+log "Installing base system..."
+pacstrap -K /mnt \
+  base base-devel linux-zen linux-zen-headers linux-firmware amd-ucode \
+  sudo vim nano git wget \
+  networkmanager btrfs-progs snapper \
+  pipewire pipewire-alsa pipewire-pulse \
+  plasma-meta sddm konsole dolphin firefox \
+  nvidia-open-dkms nvidia-utils lib32-nvidia-utils nvidia-settings
+
+# -------------------------
+# fstab
+# -------------------------
+log "Generating fstab..."
+genfstab -U /mnt > /mnt/etc/fstab
+
+# -------------------------
+# ZRAM config
+# -------------------------
+cat > /mnt/etc/systemd/zram-generator.conf <<EOF
+[zram0]
+zram-size = $ZRAM_SIZE
+compression-algorithm = zstd
+EOF
+
+# -------------------------
+# Chroot
+# -------------------------
+log "Entering chroot..."
+arch-chroot /mnt /bin/bash <<EOF
+set -euo pipefail
+
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+echo "sv_SE.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+echo "$HOSTNAME" > /etc/hostname
+echo "KEYMAP=se-latin1" > /etc/vconsole.conf
+
+echo "root:$ROOT_PASS" | chpasswd
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$USER_PASS" | chpasswd
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
+chmod 440 /etc/sudoers.d/wheel
+
+sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+mkinitcpio -P
+
+bootctl install
+PARTUUID=\$(blkid -s PARTUUID -o value "$ROOT")
+
+cat > /boot/loader/loader.conf <<EOT
+default arch.conf
+timeout 3
+editor no
+EOT
+
+cat > /boot/loader/entries/arch.conf <<EOT
+title Arch Linux (Zen)
+linux /vmlinuz-linux-zen
+initrd /amd-ucode.img
+initrd /initramfs-linux-zen.img
+options root=PARTUUID=\$PARTUUID rw rootflags=subvol=@ quiet nvidia_drm.modeset=1
+EOT
+
+systemctl enable NetworkManager sddm systemd-resolved
+EOF
+
+# -------------------------
+# Finish
+# -------------------------
+log "Unmounting..."
+umount -R /mnt
+
+log "✅ Installation complete. You may reboot."mount -o subvol=@home,"$MOUNT_OPTS" "$MAIN_PART" /mnt/home
 mount -o subvol=@snapshots,"$MOUNT_OPTS" "$MAIN_PART" /mnt/.snapshots
 mount -o subvol=@var_log,"$MOUNT_OPTS" "$MAIN_PART" /mnt/var/log
 mount -o umask=0077 "$EFI_PART" /mnt/boot
@@ -314,4 +407,5 @@ trace "Unmounting target filesystem..."
 umount -R /mnt || true
 
 trace "Installation finished. Reboot when ready."
+
 
