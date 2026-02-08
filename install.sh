@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# -------------------------
-# Logger
-# -------------------------
 log() { echo -e "\n[$(date +%H:%M:%S)] $*"; }
 
 # -------------------------
-# Configuration
+# Config
 # -------------------------
 TIMEZONE="Europe/Stockholm"
 HOSTNAME="overlord"
@@ -15,16 +12,13 @@ USERNAME="toffe"
 ZRAM_SIZE="16G"
 MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
 
-# -------------------------
-# Passwords
-# -------------------------
 read -sp "Enter password for $USERNAME: " USER_PASS; echo
 read -sp "Enter password for root: " ROOT_PASS; echo
 
 # -------------------------
-# Network
+# Network (installer only)
 # -------------------------
-log "Starting network services..."
+log "Starting network..."
 systemctl start NetworkManager || true
 
 # -------------------------
@@ -32,20 +26,18 @@ systemctl start NetworkManager || true
 # -------------------------
 INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME || true)
 
-echo "Available disks:"
 lsblk -dpno NAME,SIZE,MODEL | grep disk | grep -v "$INSTALLER_USB"
-
-read -rp "Enter disk to ERASE (example: /dev/nvme0n1): " DISK
+read -rp "Disk to ERASE (e.g. /dev/nvme0n1): " DISK
 [[ -b "$DISK" ]] || { echo "Invalid disk"; exit 1; }
 
-echo "⚠️  ALL DATA ON $DISK WILL BE LOST"
+echo "⚠️ ALL DATA ON $DISK WILL BE LOST"
 read -rp "Type YES to confirm: " CONFIRM
 [[ "$CONFIRM" == "YES" ]] || exit 1
 
 # -------------------------
 # Partitioning
 # -------------------------
-log "Partitioning disk..."
+log "Partitioning..."
 sgdisk --zap-all "$DISK"
 sgdisk -n 1:0:+1G -t 1:EF00 "$DISK"
 sgdisk -n 2:0:0   -t 2:8300 "$DISK"
@@ -59,9 +51,8 @@ mkfs.fat -F32 "$EFI"
 mkfs.btrfs -f "$ROOT"
 
 # -------------------------
-# Btrfs subvolumes
+# Btrfs
 # -------------------------
-log "Creating Btrfs subvolumes..."
 mount "$ROOT" /mnt
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
@@ -69,12 +60,97 @@ btrfs subvolume create /mnt/@snapshots
 btrfs subvolume create /mnt/@var_log
 umount /mnt
 
-# -------------------------
-# Mount layout
-# -------------------------
-log "Mounting filesystem..."
 mount -o subvol=@,"$MOUNT_OPTS" "$ROOT" /mnt
 mkdir -p /mnt/{boot,home,.snapshots,var/log}
+mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT" /mnt/home
+mount -o subvol=@snapshots,"$MOUNT_OPTS" "$ROOT" /mnt/.snapshots
+mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log
+mount -o umask=0077 "$EFI" /mnt/boot
+
+# -------------------------
+# Mirrors
+# -------------------------
+log "Updating mirrors..."
+sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
+pacman -Sy --noconfirm reflector
+reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist
+
+# -------------------------
+# Pacstrap (FAIL HARD if broken)
+# -------------------------
+log "Installing base system..."
+pacstrap -K /mnt \
+  base base-devel linux-zen linux-zen-headers linux-firmware amd-ucode \
+  sudo vim nano git wget \
+  networkmanager btrfs-progs snapper \
+  pipewire pipewire-alsa pipewire-pulse \
+  plasma-meta sddm konsole dolphin firefox \
+  nvidia-open-dkms nvidia-utils lib32-nvidia-utils nvidia-settings
+
+log "Pacstrap completed successfully."
+
+# -------------------------
+# fstab
+# -------------------------
+genfstab -U /mnt > /mnt/etc/fstab
+
+# -------------------------
+# ZRAM
+# -------------------------
+cat > /mnt/etc/systemd/zram-generator.conf <<EOF
+[zram0]
+zram-size = $ZRAM_SIZE
+compression-algorithm = zstd
+EOF
+
+# -------------------------
+# Chroot
+# -------------------------
+log "Configuring system..."
+arch-chroot /mnt /bin/bash <<EOF
+set -euo pipefail
+
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+echo "sv_SE.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+echo "$HOSTNAME" > /etc/hostname
+echo "KEYMAP=se-latin1" > /etc/vconsole.conf
+
+echo "root:$ROOT_PASS" | chpasswd
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$USER_PASS" | chpasswd
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
+chmod 440 /etc/sudoers.d/wheel
+
+sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+mkinitcpio -P
+
+bootctl install
+PARTUUID=\$(blkid -s PARTUUID -o value "$ROOT")
+
+cat > /boot/loader/entries/arch.conf <<EOT
+title Arch Linux (Zen)
+linux /vmlinuz-linux-zen
+initrd /amd-ucode.img
+initrd /initramfs-linux-zen.img
+options root=PARTUUID=\$PARTUUID rw rootflags=subvol=@ quiet nvidia_drm.modeset=1
+EOT
+
+systemctl enable NetworkManager
+systemctl enable sddm
+systemctl enable systemd-resolved
+EOF
+
+# -------------------------
+# Done
+# -------------------------
+umount -R /mnt
+log "✅ Install finished. Reboot when ready."mkdir -p /mnt/{boot,home,.snapshots,var/log}
 mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT" /mnt/home
 mount -o subvol=@snapshots,"$MOUNT_OPTS" "$ROOT" /mnt/.snapshots
 mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log
@@ -407,5 +483,6 @@ trace "Unmounting target filesystem..."
 umount -R /mnt || true
 
 trace "Installation finished. Reboot when ready."
+
 
 
