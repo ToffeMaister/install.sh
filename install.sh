@@ -8,7 +8,7 @@ trace() { printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 # Configuration
 # -------------------------
 TIMEZONE="Europe/Stockholm"
-USER_NAME="tobias"
+USER_NAME="toffe"
 HOSTNAME="overlord"
 MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2"
 ZRAM_SIZE="16G"
