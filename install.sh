@@ -57,10 +57,11 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount layout (order matters)
+# Mount layout (correct Arch order)
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime "$ROOT_PART" /mnt
 
+# Create mount points BEFORE mounting subvolumes
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
 mkdir -p /mnt/var
@@ -120,7 +121,7 @@ sed -i "s/^#\\($LOCALE\\)/\\1/" /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 
-# Swedish keyboard (console only; language stays English)
+# Swedish keyboard (console only; system language stays English)
 echo "KEYMAP=sv-latin1" > /etc/vconsole.conf
 
 # Hostname
