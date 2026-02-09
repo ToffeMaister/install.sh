@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Enforce bash
+[ -n "${BASH_VERSION:-}" ] || {
+  echo "This script must be run with bash"
+  exit 1
+}
+
 # ============================================================
 # Arch Linux Install Script
 # Hardware: Ryzen 5600 + RTX 5070 Ti + NVMe (/dev/nvme0n1)
 # Boot: UEFI + systemd-boot
 # Filesystem: Btrfs (subvolumes @ and @home)
-# Swap: zram (systemd-zram-generator)
+# Swap: zram (16GB, zstd)
 # Desktop: KDE Plasma (Wayland)
 # Kernel: linux-zen
 # ============================================================
@@ -22,7 +28,7 @@ DRIVE="/dev/nvme0n1"
 EFI="${DRIVE}p1"
 ROOT="${DRIVE}p2"
 
-# --- DISK PARTITIONING (UEFI + GPT, UNATTENDED) ---
+# --- DISK PARTITIONING (UNATTENDED) ---
 sgdisk --zap-all "${DRIVE}"
 sgdisk -n 1:1MiB:+1GiB -t 1:ef00 -c 1:"EFI"  "${DRIVE}"
 sgdisk -n 2:0:0        -t 2:8300 -c 2:"ROOT" "${DRIVE}"
@@ -50,15 +56,15 @@ pacstrap /mnt \
   nvidia-open nvidia-utils \
   plasma sddm \
   networkmanager \
-  sudo nano
+  sudo nano \
+  systemd-zram-generator
 
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- CHROOT CONFIG ---
+# --- NON-INTERACTIVE CHROOT CONFIG ---
 arch-chroot /mnt /bin/bash <<EOF
 set -e
 
-# Time & locale
 ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
 hwclock --systohc
 
@@ -71,40 +77,23 @@ LANG=${LANG_LOCALE}
 LC_TIME=${SV_LOCALE}
 EOL
 
-# Hostname
 echo "${HOSTNAME}" > /etc/hostname
 
-# User
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 
-# Passwords (retry-safe)
-echo "Set root password:"
-until passwd; do
-  echo "Passwords did not match. Try again."
-done
-
-echo "Set password for ${USERNAME}:"
-until passwd "${USERNAME}"; do
-  echo "Passwords did not match. Try again."
-done
-
-# Enable services
 systemctl enable NetworkManager
 systemctl enable sddm
 systemctl enable nvidia-persistenced
 
-# NVIDIA DRM (Wayland-safe)
 cat > /etc/modprobe.d/nvidia.conf <<EON
 options nvidia_drm modeset=1 fbdev=1
 EON
 
-# Initramfs
 sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect modconf block filesystems keyboard fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# systemd-boot
 bootctl install
 
 cat > /boot/loader/loader.conf <<EOL
@@ -122,6 +111,21 @@ options root=LABEL=archroot rootflags=subvol=@ rw quiet \
         nvidia_drm.modeset=1 nvidia_drm.fbdev=1 loglevel=3
 EOL
 
+# zram configuration (fixed 16GB)
+cat > /etc/systemd/zram-generator.conf <<EOL
+[zram0]
+zram-size = 16384
+compression-algorithm = zstd
+swap-priority = 100
+EOL
+
 EOF
+
+# --- INTERACTIVE PASSWORD SETUP ---
+echo "Set root password:"
+arch-chroot /mnt passwd
+
+echo "Set password for ${USERNAME}:"
+arch-chroot /mnt passwd "${USERNAME}"
 
 echo "Installation complete. Reboot when ready."
