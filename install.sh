@@ -25,12 +25,12 @@ fi
 EFI_PART="${DISK}${PART_SUFFIX}1"
 ROOT_PART="${DISK}${PART_SUFFIX}2"
 
-echo "==> Starting full Arch install on $DISK"
+echo "==> Installing Arch on $DISK"
 echo "==> EFI:  $EFI_PART"
 echo "==> ROOT: $ROOT_PART"
 
 # ------------------------------------------------------------
-# Disk partitioning (UEFI + GPT)
+# Partitioning
 # ------------------------------------------------------------
 wipefs -a "$DISK"
 sgdisk --zap-all "$DISK"
@@ -59,9 +59,10 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount
+# Mount layout
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime "$ROOT_PART" /mnt
+
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
 mkdir -p /mnt/var
@@ -78,7 +79,7 @@ mount -o subvol=@snapshots,compress=zstd,noatime "$ROOT_PART" /mnt/.snapshots
 mount "$EFI_PART" /mnt/boot
 
 # ------------------------------------------------------------
-# Base install (NO AUDIO STACK)
+# Base install (no audio stack)
 # ------------------------------------------------------------
 pacstrap -K /mnt \
   base \
@@ -173,4 +174,3 @@ ENTRY
 EOF
 
 echo "==> Installation complete. Reboot."
-
