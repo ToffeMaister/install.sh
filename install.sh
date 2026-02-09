@@ -1,5 +1,3 @@
-
- 
 #!/usr/bin/env bash
 set -e
 
@@ -74,7 +72,7 @@ EOX
 
 echo "$HOSTNAME" > /etc/hostname
 
-sed -i '/$$multilib$$/,/Include/ s/^#//' /etc/pacman.conf
+sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
 echo "Set root password:"
 passwd
@@ -116,4 +114,3 @@ EOF
 
 umount -R /mnt
 echo "Installation complete! You can reboot now."
-
