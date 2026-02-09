@@ -9,12 +9,17 @@ set -euo pipefail
 
 # ============================================================
 # Arch Linux Install Script
-# Hardware: Ryzen 5600 + RTX 5070 Ti + NVMe (/dev/nvme0n1)
 # Boot: UEFI + systemd-boot
-# Filesystem: Btrfs (subvolumes @ and @home)
-# Swap: none (zram installed post-boot)
-# Desktop: KDE Plasma (Wayland)
+# FS: Btrfs (@, @home)
 # Kernel: linux-zen
+# Desktop: KDE Plasma (Wayland)
+# NVIDIA: nvidia-open + modeset
+# Swap: none (zram installed post-boot)
+#
+# Fixes:
+# - Uses PARTUUID for root=
+# - Password prompts moved inside chroot (always shown)
+# - Pre-boot validation
 # ============================================================
 
 # --- CONFIG ---
@@ -27,6 +32,8 @@ SV_LOCALE="sv_SE.UTF-8"
 DRIVE="/dev/nvme0n1"
 EFI="${DRIVE}p1"
 ROOT="${DRIVE}p2"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
 
 # --- DISK PARTITIONING ---
 sgdisk --zap-all "${DRIVE}"
@@ -60,9 +67,13 @@ pacstrap /mnt \
 
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- NON-INTERACTIVE CHROOT CONFIG ---
+# --- PARTUUID ---
+ROOT_PARTUUID="$(blkid -s PARTUUID -o value "${ROOT}")"
+[ -n "${ROOT_PARTUUID}" ] || die "Failed to read PARTUUID"
+
+# --- CHROOT CONFIG (PASSWORDS SET HERE) ---
 arch-chroot /mnt /bin/bash <<EOF
-set -e
+set -euo pipefail
 
 ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
 hwclock --systohc
@@ -81,6 +92,12 @@ echo "${HOSTNAME}" > /etc/hostname
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 
+echo "Set root password:"
+passwd
+
+echo "Set password for ${USERNAME}:"
+passwd "${USERNAME}"
+
 systemctl enable NetworkManager
 systemctl enable sddm
 systemctl enable nvidia-persistenced
@@ -89,7 +106,7 @@ cat > /etc/modprobe.d/nvidia.conf <<EON
 options nvidia_drm modeset=1 fbdev=1
 EON
 
-sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+sed -i 's/^MODULES=.*/MODULES=(btrfs nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect modconf block filesystems keyboard fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
@@ -106,16 +123,26 @@ title   Arch Linux (linux-zen)
 linux   /vmlinuz-linux-zen
 initrd  /amd-ucode.img
 initrd  /initramfs-linux-zen.img
-options root=LABEL=archroot rootflags=subvol=@ rw quiet \
-        nvidia_drm.modeset=1 nvidia_drm.fbdev=1 loglevel=3
+options root=PARTUUID=${ROOT_PARTUUID} rootflags=subvol=@ rw quiet loglevel=3 \\
+        nvidia_drm.modeset=1 nvidia_drm.fbdev=1
 EOL
 EOF
 
-# --- INTERACTIVE PASSWORD SETUP ---
-echo "Set root password:"
-arch-chroot /mnt passwd
+# --- PRE-BOOT VALIDATION ---
+echo "Running pre-boot validation..."
 
-echo "Set password for ${USERNAME}:"
-arch-chroot /mnt passwd "${USERNAME}"
+mountpoint -q /mnt || die "/mnt not mounted"
+mountpoint -q /mnt/boot || die "/mnt/boot not mounted"
 
+[ -f /mnt/boot/loader/loader.conf ] || die "Missing loader.conf"
+[ -f /mnt/boot/loader/entries/arch.conf ] || die "Missing arch.conf"
+
+grep -q "root=PARTUUID=${ROOT_PARTUUID}" /mnt/boot/loader/entries/arch.conf \
+  || die "PARTUUID mismatch in arch.conf"
+
+[ -f /mnt/boot/vmlinuz-linux-zen ] || die "Missing kernel"
+[ -f /mnt/boot/initramfs-linux-zen.img ] || die "Missing initramfs"
+[ -f /mnt/boot/amd-ucode.img ] || die "Missing microcode"
+
+echo "Pre-boot validation complete."
 echo "Installation complete. Reboot when ready."
