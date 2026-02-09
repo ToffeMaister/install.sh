@@ -26,8 +26,6 @@ EFI_PART="${DISK}${PART_SUFFIX}1"
 ROOT_PART="${DISK}${PART_SUFFIX}2"
 
 echo "==> Installing Arch on $DISK"
-echo "==> EFI:  $EFI_PART"
-echo "==> ROOT: $ROOT_PART"
 
 # ------------------------------------------------------------
 # Partitioning
@@ -59,11 +57,10 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount layout (ORDER MATTERS)
+# Mount layout (order matters)
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime "$ROOT_PART" /mnt
 
-# Create ALL mount points BEFORE mounting subvolumes
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
 mkdir -p /mnt/var
@@ -115,6 +112,7 @@ genfstab -U /mnt >> /mnt/etc/fstab
 arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
 
+# Time & locale
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
@@ -122,6 +120,10 @@ sed -i "s/^#\\($LOCALE\\)/\\1/" /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 
+# Swedish keyboard (console only; language stays English)
+echo "KEYMAP=sv-latin1" > /etc/vconsole.conf
+
+# Hostname
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts <<HOSTS
 127.0.0.1   localhost
@@ -129,9 +131,11 @@ cat > /etc/hosts <<HOSTS
 127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
 HOSTS
 
+# Services
 systemctl enable NetworkManager
 systemctl enable sddm
 
+# User
 id -u $USERNAME >/dev/null 2>&1 || useradd -m -G wheel -s /bin/bash $USERNAME
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 chmod 0440 /etc/sudoers.d/wheel
@@ -139,6 +143,7 @@ chmod 0440 /etc/sudoers.d/wheel
 echo "root:$ROOT_PASSWORD" | chpasswd
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
 
+# NVIDIA
 pacman -Rns --noconfirm nvidia nvidia-open 2>/dev/null || true
 
 cat > /etc/modprobe.d/blacklist-nouveau.conf <<NOUVEAU
@@ -157,6 +162,7 @@ ENV
 
 mkinitcpio -P
 
+# Bootloader
 bootctl install
 
 cat > /boot/loader/loader.conf <<BOOT
