@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Enforce bash
-[ -n "${BASH_VERSION:-}" ] || {
-  echo "This script must be run with bash"
-  exit 1
-}
+[ -n "${BASH_VERSION:-}" ] || { echo "This script must be run with bash"; exit 1; }
 
 # ============================================================
 # Arch Linux Install Script
@@ -13,13 +9,8 @@ set -euo pipefail
 # FS: Btrfs (@, @home)
 # Kernel: linux-zen
 # Desktop: KDE Plasma (Wayland)
-# NVIDIA: nvidia-open + modeset
+# NVIDIA: nvidia-open
 # Swap: none (zram installed post-boot)
-#
-# Fixes:
-# - Uses PARTUUID for root=
-# - Password prompts moved inside chroot (always shown)
-# - Pre-boot validation
 # ============================================================
 
 # --- CONFIG ---
@@ -28,6 +19,9 @@ HOSTNAME="overlord"
 TIMEZONE="Europe/Stockholm"
 LANG_LOCALE="en_US.UTF-8"
 SV_LOCALE="sv_SE.UTF-8"
+
+ROOT_PASSWORD="456"
+USER_PASSWORD="123"
 
 DRIVE="/dev/nvme0n1"
 EFI="${DRIVE}p1"
@@ -71,7 +65,7 @@ genfstab -U /mnt >> /mnt/etc/fstab
 ROOT_PARTUUID="$(blkid -s PARTUUID -o value "${ROOT}")"
 [ -n "${ROOT_PARTUUID}" ] || die "Failed to read PARTUUID"
 
-# --- CHROOT CONFIG (PASSWORDS SET HERE) ---
+# --- CHROOT CONFIG ---
 arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
 
@@ -92,11 +86,9 @@ echo "${HOSTNAME}" > /etc/hostname
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 
-echo "Set root password:"
-passwd
-
-echo "Set password for ${USERNAME}:"
-passwd "${USERNAME}"
+# --- SET PASSWORDS NON-INTERACTIVELY ---
+echo "root:${ROOT_PASSWORD}" | chpasswd
+echo "${USERNAME}:${USER_PASSWORD}" | chpasswd
 
 systemctl enable NetworkManager
 systemctl enable sddm
@@ -129,8 +121,6 @@ EOL
 EOF
 
 # --- PRE-BOOT VALIDATION ---
-echo "Running pre-boot validation..."
-
 mountpoint -q /mnt || die "/mnt not mounted"
 mountpoint -q /mnt/boot || die "/mnt/boot not mounted"
 
@@ -144,5 +134,4 @@ grep -q "root=PARTUUID=${ROOT_PARTUUID}" /mnt/boot/loader/entries/arch.conf \
 [ -f /mnt/boot/initramfs-linux-zen.img ] || die "Missing initramfs"
 [ -f /mnt/boot/amd-ucode.img ] || die "Missing microcode"
 
-echo "Pre-boot validation complete."
 echo "Installation complete. Reboot when ready."
