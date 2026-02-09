@@ -62,7 +62,12 @@ umount /mnt
 # Mount
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime "$ROOT_PART" /mnt
-mkdir -p /mnt/{boot,home,var,var/log,var/cache/pacman/pkg,.snapshots}
+mkdir -p /mnt/boot
+mkdir -p /mnt/home
+mkdir -p /mnt/var
+mkdir -p /mnt/var/log
+mkdir -p /mnt/var/cache/pacman/pkg
+mkdir -p /mnt/.snapshots
 
 mount -o subvol=@home,compress=zstd,noatime "$ROOT_PART" /mnt/home
 mount -o subvol=@var,compress=zstd,noatime "$ROOT_PART" /mnt/var
@@ -168,3 +173,4 @@ ENTRY
 EOF
 
 echo "==> Installation complete. Reboot."
+
