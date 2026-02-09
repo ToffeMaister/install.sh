@@ -2,6 +2,9 @@
 set -euo pipefail
 
 DISK="/dev/nvme0n1"
+EFI_PART="/dev/nvme0n1p1"
+ROOT_PART="/dev/nvme0n1p2"
+
 HOSTNAME="overlord"
 USERNAME="toffe"
 TIMEZONE="Europe/Stockholm"
@@ -13,24 +16,13 @@ EFI_LABEL="EFI"
 ROOT_PASSWORD="456"
 USER_PASSWORD="123"
 
-die() {
-  echo "ERROR: $*" >&2
-  exit 1
-}
+# ------------------------------------------------------------
+# Preconditions
+# ------------------------------------------------------------
+[ -d /sys/firmware/efi/efivars ] || exit 1
 
 # ------------------------------------------------------------
-# Sanity checks
-# ------------------------------------------------------------
-[ -b "$DISK" ] || die "Disk not found: $DISK"
-[ -d /sys/firmware/efi/efivars ] || die "Not booted in UEFI mode"
-
-EFI_PART="${DISK}p1"
-ROOT_PART="${DISK}p2"
-
-echo "==> Installing Arch Linux on $DISK"
-
-# ------------------------------------------------------------
-# Partitioning
+# Partition disk
 # ------------------------------------------------------------
 wipefs -a "$DISK"
 sgdisk --zap-all "$DISK"
@@ -45,7 +37,7 @@ mkfs.fat -F32 -n "$EFI_LABEL" "$EFI_PART"
 mkfs.btrfs -f -L "$ROOT_LABEL" "$ROOT_PART"
 
 # ------------------------------------------------------------
-# Btrfs subvolumes
+# Create Btrfs subvolumes
 # ------------------------------------------------------------
 mount "$ROOT_PART" /mnt
 
@@ -59,27 +51,29 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount layout
+# Mount filesystems
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt
 
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
 mkdir -p /mnt/var
-mkdir -p /mnt/var/log
-mkdir -p /mnt/var/cache/pacman/pkg
 mkdir -p /mnt/.snapshots
 
 mount -o subvol=@home,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/home
 mount -o subvol=@var,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var
+mount -o subvol=@snapshots,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/.snapshots
+
+mkdir -p /mnt/var/log
+mkdir -p /mnt/var/cache/pacman/pkg
+
 mount -o subvol=@log,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/log
 mount -o subvol=@pkg,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/cache/pacman/pkg
-mount -o subvol=@snapshots,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/.snapshots
 
 mount "$EFI_PART" /mnt/boot
 
 # ------------------------------------------------------------
-# Base system install
+# Install base system
 # ------------------------------------------------------------
 pacstrap -K /mnt \
   base \
@@ -109,7 +103,7 @@ pacstrap -K /mnt \
 genfstab -U /mnt > /mnt/etc/fstab
 
 # ------------------------------------------------------------
-# Chroot configuration
+# Configure system
 # ------------------------------------------------------------
 arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
@@ -140,8 +134,6 @@ chmod 0440 /etc/sudoers.d/wheel
 
 echo "root:$ROOT_PASSWORD" | chpasswd
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
-
-pacman -Rns --noconfirm nvidia nvidia-open 2>/dev/null || true
 
 cat > /etc/modprobe.d/blacklist-nouveau.conf <<NOUVEAU
 blacklist nouveau
@@ -176,4 +168,4 @@ options root=LABEL=$ROOT_LABEL rw nvidia_drm.modeset=1
 ENTRY
 EOF
 
-echo "==> Installation complete. Reboot."
+echo "Installation complete. Reboot."
