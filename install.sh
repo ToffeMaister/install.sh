@@ -17,7 +17,18 @@ ROOT_PASSWORD="456"
 USER_PASSWORD="123"
 
 # ------------------------------------------------------------
-# Preconditions
+# Enable multilib + refresh mirrors (fixes lib32-nvidia-utils)
+# ------------------------------------------------------------
+sed -i 's/^#
+
+\[multilib\]
+
+/[multilib]/' /etc/pacman.conf
+sed -i 's/^#Include = \/etc\/pacman.d\/mirrorlist/Include = \/etc\/pacman.d\/mirrorlist/' /etc/pacman.conf
+pacman -Syy --noconfirm
+
+# ------------------------------------------------------------
+# UEFI check
 # ------------------------------------------------------------
 [ -d /sys/firmware/efi/efivars ] || exit 1
 
@@ -51,7 +62,7 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount filesystems
+# Mount filesystems (correct nested order)
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt
 
