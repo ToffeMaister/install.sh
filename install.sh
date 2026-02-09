@@ -1,143 +1,149 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-log() { echo -e "\n[$(date +%H:%M:%S)] $*"; }
+# =========================
+# Arch Linux Install Script
+# Ryzen 5600 + RTX 5070 Ti + 980 PRO/SATA
+# KDE Plasma + Wayland + zram + Btrfs
+# =========================
 
-### 1. CONFIGURATION ###
-TIMEZONE="Europe/Stockholm" 
-HOSTNAME="overlord" 
-USERNAME="toffe" 
-ZRAM_SIZE="16G" 
-MOUNT_OPTS="noatime,compress=zstd:3,discard=async,space_cache=v2" 
+USERNAME="toffe"
+HOSTNAME="overlord"
+TIMEZONE="Europe/Stockholm"
+LOCALE="en_US.UTF-8"
+SWEDISH_LOCALE="sv_SE.UTF-8"
 
-# Capture passwords early
-read -sp "Enter password for $USERNAME: " USER_PASS; echo 
-read -sp "Enter password for root: " ROOT_PASS; echo 
+# --- PHASE 0: DRIVE SELECTION ---
+echo "Available drives:"
+lsblk -d -e 7,11 -o NAME,SIZE,MODEL
+echo "Enter the drive to install to (e.g., nvme0n1 or sda):"
+read DRIVE
+DRIVE="/dev/$DRIVE"
 
-### 2. DISK SELECTION ###
-INSTALLER_USB=$(findmnt -nvo SOURCE /run/archiso/bootmnt 2>/dev/null | xargs -r lsblk -no PKNAME || true) 
-lsblk -dpno NAME,SIZE,MODEL | grep disk | grep -v "$INSTALLER_USB" 
+echo "WARNING: This will erase all data on $DRIVE. Continue? (yes/no)"
+read CONFIRM
+if [[ "$CONFIRM" != "yes" ]]; then
+    echo "Aborted."
+    exit 1
+fi
 
-read -rp "Disk to ERASE (e.g. /dev/nvme0n1): " DISK 
-[[ -b "$DISK" ]] || exit 1 
+# --- PHASE 1: PARTITIONING ---
+echo "Wiping and partitioning $DRIVE..."
+sgdisk --zap-all "$DRIVE"
+sgdisk -n 1:0:+1G -t 1:ef00 -c 1:EFI "$DRIVE"
+sgdisk -n 2:0:0   -t 2:8300 -c 2:ROOT "$DRIVE"
 
-echo "⚠️ ALL DATA ON $DISK WILL BE LOST" 
-read -rp "Type YES to confirm: " CONFIRM 
-[[ "$CONFIRM" == "YES" ]] || exit 1 
+# If NVMe, partitions are p1, p2; else 1, 2
+if [[ "$DRIVE" == *"nvme"* ]]; then
+    EFI="${DRIVE}p1"
+    ROOT="${DRIVE}p2"
+else
+    EFI="${DRIVE}1"
+    ROOT="${DRIVE}2"
+fi
 
-### 3. PARTITIONING & FORMATTING ###
-sgdisk --zap-all "$DISK" 
-sgdisk -n 1:0:+1G -t 1:EF00 "$DISK" 
-sgdisk -n 2:0:0   -t 2:8300 "$DISK" 
-udevadm settle 
+mkfs.fat -F32 "$EFI"
+mkfs.btrfs -f "$ROOT"
 
-[[ "$DISK" =~ nvme ]] && P="p" || P="" 
-EFI="${DISK}${P}1" 
-ROOT="${DISK}${P}2" 
+# --- PHASE 2: BTRFS SUBVOLUMES ---
+mount "$ROOT" /mnt
+btrfs su cr /mnt/@
+btrfs su cr /mnt/@home
+btrfs su cr /mnt/@snapshots
+umount /mnt
 
-mkfs.fat -F32 "$EFI" 
-mkfs.btrfs -f "$ROOT" 
+mount -o subvol=@,compress=zstd,noatime "$ROOT" /mnt
+mkdir -p /mnt/{boot,home,.snapshots}
+mount -o subvol=@home,compress=zstd,noatime "$ROOT" /mnt/home
+mount -o subvol=@snapshots,compress=zstd,noatime "$ROOT" /mnt/.snapshots
+mount "$EFI" /mnt/boot
 
-### 4. BTRFS SUBVOLUMES & MOUNTING ###
-mount "$ROOT" /mnt 
-btrfs subvolume create /mnt/@ 
-btrfs subvolume create /mnt/@home 
-btrfs subvolume create /mnt/@snapshots 
-btrfs subvolume create /mnt/@var_log 
-umount /mnt 
+# --- PHASE 3: BASE SYSTEM ---
+pacman -Sy --noconfirm pacman-contrib btrfs-progs
+cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+rankmirrors -n 6 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 
-mount -o subvol=@,"$MOUNT_OPTS" "$ROOT" /mnt 
-mkdir -p /mnt/{boot,home,.snapshots,var/log} 
-mount -o subvol=@home,"$MOUNT_OPTS" "$ROOT" /mnt/home 
-mount -o subvol=@snapshots,"$MOUNT_OPTS" "$ROOT" /mnt/.snapshots 
-mount -o subvol=@var_log,"$MOUNT_OPTS" "$ROOT" /mnt/var/log 
-mount -o umask=0077 "$EFI" /mnt/boot 
+pacstrap -K /mnt base linux-zen linux-zen-headers linux-firmware base-devel amd-ucode nano git btrfs-progs
 
-### 5. BASE INSTALLATION ###
-sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf 
-pacman -Sy --noconfirm reflector 
-reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist 
+genfstab -U /mnt >> /mnt/etc/fstab
 
-pacstrap -K /mnt \
-  base base-devel linux-zen linux-zen-headers linux-firmware amd-ucode \
-  sudo vim nano git wget \
-  networkmanager btrfs-progs snapper \
-  pipewire pipewire-alsa pipewire-pulse \
-  plasma-meta sddm konsole dolphin \
-  nvidia-open-dkms nvidia-utils lib32-nvidia-utils nvidia-settings 
-
-### 6. SYSTEM CONFIGURATION ###
-genfstab -U /mnt > /mnt/etc/fstab 
-
-cat > /mnt/etc/systemd/zram-generator.conf <<EOF
-[zram0]
-zram-size = $ZRAM_SIZE
-compression-algorithm = zstd
-EOF 
-
-export TIMEZONE HOSTNAME USERNAME ROOT_PASS USER_PASS ROOT 
-
+# --- PHASE 4: CHROOT & CONFIG ---
 arch-chroot /mnt /bin/bash <<EOF
-set -euo pipefail
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
 
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime 
-hwclock --systohc 
+# --- Locale and Language ---
+echo "$LOCALE UTF-8" >> /etc/locale.gen
+echo "$SWEDISH_LOCALE UTF-8" >> /etc/locale.gen
+locale-gen
 
-echo "en_US.UTF-8 UTF-8" > /etc/locale.gen 
-echo "sv_SE.UTF-8 UTF-8" >> /etc/locale.gen 
-locale-gen 
-echo "LANG=en_US.UTF-8" > /etc/locale.conf 
+echo "LANG=$LOCALE" > /etc/locale.conf
+echo "LC_TIME=$SWEDISH_LOCALE" >> /etc/locale.conf
+echo "LC_MONETARY=$SWEDISH_LOCALE" >> /etc/locale.conf
+echo "LC_NUMERIC=$SWEDISH_LOCALE" >> /etc/locale.conf
+echo "LC_MEASUREMENT=$SWEDISH_LOCALE" >> /etc/locale.conf
 
-echo "$HOSTNAME" > /etc/hostname 
-echo "KEYMAP=se-latin1" > /etc/vconsole.conf 
+# --- Swedish Keyboard Layout ---
+echo "KEYMAP=sv-latin1" > /etc/vconsole.conf
+mkdir -p /etc/X11/xorg.conf.d
+cat <<EOX > /etc/X11/xorg.conf.d/00-keyboard.conf
+Section "InputClass"
+    Identifier "system-keyboard"
+    MatchIsKeyboard "on"
+    Option "XkbLayout" "se"
+EndSection
+EOX
 
-echo "root:$ROOT_PASS" | chpasswd 
-useradd -m -G wheel -s /bin/bash "$USERNAME" 
-echo "$USERNAME:$USER_PASS" | chpasswd 
-echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel 
-chmod 440 /etc/sudoers.d/wheel 
+echo "$HOSTNAME" > /etc/hostname
 
-# NVIDIA Configuration
-sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf 
-mkinitcpio -P 
+# Enable multilib
+sed -i '/\$$multilib\$$/,/Include/ s/^#//' /etc/pacman.conf
 
-# NVIDIA Hook Implementation
-mkdir -p /etc/pacman.d/hooks 
-cat > /etc/pacman.d/hooks/nvidia.hook <<HOOK
-[Trigger]
-Operation=Install
-Operation=Upgrade
-Operation=Remove
-Type=Package
-Target=nvidia
+# Set root password
+echo "Set root password:"
+passwd
 
-[Action]
-Depends=mkinitcpio
-When=PostTransaction
-Exec=/usr/bin/mkinitcpio -P
-HOOK 
+# User setup
+useradd -m -g users -G wheel,storage,power -s /bin/bash $USERNAME
+echo "Set password for $USERNAME:"
+passwd $USERNAME
+EDITOR=nano visudo  # Uncomment: %wheel ALL=(ALL:ALL) ALL
 
-# Bootloader
-bootctl install 
-PARTUUID=\$(blkid -s PARTUUID -o value "$ROOT") 
+# --- PHASE 5: DRIVERS & SERVICES ---
+pacman -S --noconfirm nvidia-open-dkms nvidia-utils lib32-nvidia-utils networkmanager pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber bluez bluez-utils sddm
 
-cat > /boot/loader/loader.conf <<EOT
-default arch.conf
-timeout 3
-editor no
-EOT 
+systemctl enable NetworkManager bluetooth fstrim.timer sddm
 
-cat > /boot/loader/entries/arch.conf <<EOT
-title Arch Linux (Zen)
-linux /vmlinuz-linux-zen
-initrd /amd-ucode.img
-initrd /initramfs-linux-zen.img
-options root=PARTUUID=\$PARTUUID rw rootflags=subvol=@ quiet nvidia_drm.modeset=1
-EOT 
+# mkinitcpio for NVIDIA
+sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+mkinitcpio -P
 
-systemctl enable NetworkManager sddm systemd-resolved 
+# --- PHASE 6: BOOTLOADER ---
+bootctl install
+cat <<EOL > /boot/loader/entries/arch.conf
+title   Arch Linux (Zen)
+linux   /vmlinuz-linux-zen
+initrd  /amd-ucode.img
+initrd  /initramfs-linux-zen.img
+options root=PARTUUID=\$(blkid -s PARTUUID -o value $ROOT) rw nvidia-drm.modeset=1 nvidia_drm.fbdev=1
+EOL
+
+# --- PHASE 7: ZRAM ---
+pacman -S --noconfirm systemd-zram-generator
+cat <<ZEOF > /etc/systemd/zram-generator.conf
+[zram0]
+zram-size = ram
+compression-algorithm = zstd
+ZEOF
+systemctl enable systemd-zram-setup@zram0
+
+# --- PHASE 8: KDE PLASMA & WAYLAND ---
+pacman -S --noconfirm plasma-meta kde-applications xdg-user-dirs noto-fonts konsole dolphin
+xdg-user-dirs-update
+
+# --- PHASE 9: FINALIZE ---
+exit
 EOF
 
-### 7. FINISH ###
-umount -R /mnt 
-log "✅ Installation complete. Reboot."
+umount -R /mnt
+echo "Installation complete! You can reboot now."
