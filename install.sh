@@ -9,7 +9,7 @@ set -euo pipefail
 # FS: Btrfs (@, @home)
 # Kernel: linux-zen
 # Desktop: KDE Plasma (Wayland)
-# NVIDIA: nvidia-open
+# NVIDIA: nvidia-open (runtime load only)
 # Swap: none (zram installed post-boot)
 # ============================================================
 
@@ -86,22 +86,24 @@ echo "${HOSTNAME}" > /etc/hostname
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 
-# --- SET PASSWORDS NON-INTERACTIVELY ---
+# --- SET PASSWORDS ---
 echo "root:${ROOT_PASSWORD}" | chpasswd
 echo "${USERNAME}:${USER_PASSWORD}" | chpasswd
 
 systemctl enable NetworkManager
 systemctl enable sddm
-systemctl enable nvidia-persistenced
 
+# --- NVIDIA CONFIG (runtime load only, NOT in initramfs) ---
 cat > /etc/modprobe.d/nvidia.conf <<EON
 options nvidia_drm modeset=1 fbdev=1
 EON
 
-sed -i 's/^MODULES=.*/MODULES=(btrfs nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+# --- INITRAMFS CONFIG (NO NVIDIA MODULES) ---
+sed -i 's/^MODULES=.*/MODULES=(btrfs)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect modconf block filesystems keyboard fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
+# --- BOOTLOADER ---
 bootctl install
 
 cat > /boot/loader/loader.conf <<EOL
