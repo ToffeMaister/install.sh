@@ -12,7 +12,7 @@ set -euo pipefail
 # Hardware: Ryzen 5600 + RTX 5070 Ti + NVMe (/dev/nvme0n1)
 # Boot: UEFI + systemd-boot
 # Filesystem: Btrfs (subvolumes @ and @home)
-# Swap: zram (16GB, zstd)
+# Swap: none (zram installed post-boot)
 # Desktop: KDE Plasma (Wayland)
 # Kernel: linux-zen
 # ============================================================
@@ -28,7 +28,7 @@ DRIVE="/dev/nvme0n1"
 EFI="${DRIVE}p1"
 ROOT="${DRIVE}p2"
 
-# --- DISK PARTITIONING (UNATTENDED) ---
+# --- DISK PARTITIONING ---
 sgdisk --zap-all "${DRIVE}"
 sgdisk -n 1:1MiB:+1GiB -t 1:ef00 -c 1:"EFI"  "${DRIVE}"
 sgdisk -n 2:0:0        -t 2:8300 -c 2:"ROOT" "${DRIVE}"
@@ -56,8 +56,7 @@ pacstrap /mnt \
   nvidia-open nvidia-utils \
   plasma sddm \
   networkmanager \
-  sudo nano \
-  systemd-zram-generator
+  sudo nano
 
 genfstab -U /mnt >> /mnt/etc/fstab
 
@@ -110,15 +109,6 @@ initrd  /initramfs-linux-zen.img
 options root=LABEL=archroot rootflags=subvol=@ rw quiet \
         nvidia_drm.modeset=1 nvidia_drm.fbdev=1 loglevel=3
 EOL
-
-# zram configuration (fixed 16GB)
-cat > /etc/systemd/zram-generator.conf <<EOL
-[zram0]
-zram-size = 16384
-compression-algorithm = zstd
-swap-priority = 100
-EOL
-
 EOF
 
 # --- INTERACTIVE PASSWORD SETUP ---
