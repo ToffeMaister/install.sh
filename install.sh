@@ -59,10 +59,11 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount layout
+# Mount layout (ORDER MATTERS)
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime "$ROOT_PART" /mnt
 
+# Create ALL mount points BEFORE mounting subvolumes
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
 mkdir -p /mnt/var
