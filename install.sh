@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-# =========================
-# Arch Linux Install Script
-# Ryzen 5600 + RTX 5070 Ti + 980 PRO/SATA
-# KDE Plasma + Wayland + zram + Btrfs
-# =========================
-
 USERNAME="toffe"
 HOSTNAME="overlord"
 TIMEZONE="Europe/Stockholm"
@@ -15,7 +9,7 @@ SWEDISH_LOCALE="sv_SE.UTF-8"
 
 # --- PHASE 0: DRIVE SELECTION ---
 echo "Available drives:"
-lsblk -d -e 7,11 -o NAME,SIZE,MODEL
+lsblk -d -e 7,11 -o NAME,SIZE
 echo "Enter the drive to install to (e.g., nvme0n1 or sda):"
 read DRIVE
 DRIVE="/dev/$DRIVE"
@@ -28,12 +22,10 @@ if [[ "$CONFIRM" != "yes" ]]; then
 fi
 
 # --- PHASE 1: PARTITIONING ---
-echo "Wiping and partitioning $DRIVE..."
 sgdisk --zap-all "$DRIVE"
 sgdisk -n 1:0:+1G -t 1:ef00 -c 1:EFI "$DRIVE"
 sgdisk -n 2:0:0   -t 2:8300 -c 2:ROOT "$DRIVE"
 
-# If NVMe, partitions are p1, p2; else 1, 2
 if [[ "$DRIVE" == *"nvme"* ]]; then
     EFI="${DRIVE}p1"
     ROOT="${DRIVE}p2"
@@ -45,7 +37,6 @@ fi
 mkfs.fat -F32 "$EFI"
 mkfs.btrfs -f "$ROOT"
 
-# --- PHASE 2: BTRFS SUBVOLUMES ---
 mount "$ROOT" /mnt
 btrfs su cr /mnt/@
 btrfs su cr /mnt/@home
@@ -58,7 +49,6 @@ mount -o subvol=@home,compress=zstd,noatime "$ROOT" /mnt/home
 mount -o subvol=@snapshots,compress=zstd,noatime "$ROOT" /mnt/.snapshots
 mount "$EFI" /mnt/boot
 
-# --- PHASE 3: BASE SYSTEM ---
 pacman -Sy --noconfirm pacman-contrib btrfs-progs
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 6 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
@@ -67,12 +57,10 @@ pacstrap -K /mnt base linux-zen linux-zen-headers linux-firmware base-devel amd-
 
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- PHASE 4: CHROOT & CONFIG ---
 arch-chroot /mnt /bin/bash <<EOF
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
-# --- Locale and Language ---
 echo "$LOCALE UTF-8" >> /etc/locale.gen
 echo "$SWEDISH_LOCALE UTF-8" >> /etc/locale.gen
 locale-gen
@@ -83,7 +71,6 @@ echo "LC_MONETARY=$SWEDISH_LOCALE" >> /etc/locale.conf
 echo "LC_NUMERIC=$SWEDISH_LOCALE" >> /etc/locale.conf
 echo "LC_MEASUREMENT=$SWEDISH_LOCALE" >> /etc/locale.conf
 
-# --- Swedish Keyboard Layout ---
 echo "KEYMAP=sv-latin1" > /etc/vconsole.conf
 mkdir -p /etc/X11/xorg.conf.d
 cat <<EOX > /etc/X11/xorg.conf.d/00-keyboard.conf
@@ -96,29 +83,23 @@ EOX
 
 echo "$HOSTNAME" > /etc/hostname
 
-# Enable multilib
-sed -i '/\$$multilib\$$/,/Include/ s/^#//' /etc/pacman.conf
+sed -i '/$$multilib$$/,/Include/ s/^#//' /etc/pacman.conf
 
-# Set root password
 echo "Set root password:"
 passwd
 
-# User setup
 useradd -m -g users -G wheel,storage,power -s /bin/bash $USERNAME
 echo "Set password for $USERNAME:"
 passwd $USERNAME
-EDITOR=nano visudo  # Uncomment: %wheel ALL=(ALL:ALL) ALL
+EDITOR=nano visudo
 
-# --- PHASE 5: DRIVERS & SERVICES ---
 pacman -S --noconfirm nvidia-open-dkms nvidia-utils lib32-nvidia-utils networkmanager pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber bluez bluez-utils sddm
 
 systemctl enable NetworkManager bluetooth fstrim.timer sddm
 
-# mkinitcpio for NVIDIA
 sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# --- PHASE 6: BOOTLOADER ---
 bootctl install
 cat <<EOL > /boot/loader/entries/arch.conf
 title   Arch Linux (Zen)
@@ -128,7 +109,6 @@ initrd  /initramfs-linux-zen.img
 options root=PARTUUID=\$(blkid -s PARTUUID -o value $ROOT) rw nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 EOL
 
-# --- PHASE 7: ZRAM ---
 pacman -S --noconfirm systemd-zram-generator
 cat <<ZEOF > /etc/systemd/zram-generator.conf
 [zram0]
@@ -137,11 +117,9 @@ compression-algorithm = zstd
 ZEOF
 systemctl enable systemd-zram-setup@zram0
 
-# --- PHASE 8: KDE PLASMA & WAYLAND ---
 pacman -S --noconfirm plasma-meta kde-applications xdg-user-dirs noto-fonts konsole dolphin
 xdg-user-dirs-update
 
-# --- PHASE 9: FINALIZE ---
 exit
 EOF
 
