@@ -78,12 +78,16 @@ echo "${HOSTNAME}" > /etc/hostname
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 
-# Passwords (ONLY INTERACTIVE PROMPTS)
+# Passwords (retry-safe)
 echo "Set root password:"
-passwd
+until passwd; do
+  echo "Passwords did not match. Try again."
+done
 
 echo "Set password for ${USERNAME}:"
-passwd "${USERNAME}"
+until passwd "${USERNAME}"; do
+  echo "Passwords did not match. Try again."
+done
 
 # Enable services
 systemctl enable NetworkManager
