@@ -1,3 +1,5 @@
+
+ 
 #!/usr/bin/env bash
 set -e
 
@@ -7,12 +9,9 @@ TIMEZONE="Europe/Stockholm"
 LOCALE="en_US.UTF-8"
 SWEDISH_LOCALE="sv_SE.UTF-8"
 
-# --- PHASE 0: DRIVE SELECTION ---
-echo "Available drives:"
-lsblk -d -e 7,11 -o NAME,SIZE
-echo "Enter the drive to install to (e.g., nvme0n1 or sda):"
-read DRIVE
-DRIVE="/dev/$DRIVE"
+DRIVE="/dev/nvme0n1"
+EFI="${DRIVE}p1"
+ROOT="${DRIVE}p2"
 
 echo "WARNING: This will erase all data on $DRIVE. Continue? (yes/no)"
 read CONFIRM
@@ -21,18 +20,10 @@ if [[ "$CONFIRM" != "yes" ]]; then
     exit 1
 fi
 
-# --- PHASE 1: PARTITIONING ---
+# --- PARTITIONING ---
 sgdisk --zap-all "$DRIVE"
 sgdisk -n 1:0:+1G -t 1:ef00 -c 1:EFI "$DRIVE"
 sgdisk -n 2:0:0   -t 2:8300 -c 2:ROOT "$DRIVE"
-
-if [[ "$DRIVE" == *"nvme"* ]]; then
-    EFI="${DRIVE}p1"
-    ROOT="${DRIVE}p2"
-else
-    EFI="${DRIVE}1"
-    ROOT="${DRIVE}2"
-fi
 
 mkfs.fat -F32 "$EFI"
 mkfs.btrfs -f "$ROOT"
@@ -125,3 +116,4 @@ EOF
 
 umount -R /mnt
 echo "Installation complete! You can reboot now."
+
