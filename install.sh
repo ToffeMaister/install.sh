@@ -17,14 +17,28 @@ ROOT_PASSWORD="456"
 USER_PASSWORD="123"
 
 # ------------------------------------------------------------
-# Enable multilib + refresh mirrors (fixes lib32-nvidia-utils)
+# Enable multilib + refresh mirrors
 # ------------------------------------------------------------
-sed -i 's/^#
+sed -i 's|^#
 
 \[multilib\]
 
-/[multilib]/' /etc/pacman.conf
-sed -i 's/^#Include = \/etc\/pacman.d\/mirrorlist/Include = \/etc\/pacman.d\/mirrorlist/' /etc/pacman.conf
+|
+
+\[multilib\]
+
+|' /etc/pacman.conf
+sed -i 's|^
+
+\[multilib\]
+
+|
+
+\[multilib\]
+
+|' /etc/pacman.conf
+sed -i 's|^#Include = /etc/pacman.d/mirrorlist|Include = /etc/pacman.d/mirrorlist|' /etc/pacman.conf
+
 pacman -Syy --noconfirm
 
 # ------------------------------------------------------------
