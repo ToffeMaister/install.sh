@@ -67,21 +67,17 @@ btrfs subvolume create /mnt/@snapshots
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount filesystems (correct nested order)
+# Mount filesystems
 # ------------------------------------------------------------
 mount -o subvol=@,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt
 
-mkdir -p /mnt/boot
-mkdir -p /mnt/home
-mkdir -p /mnt/var
-mkdir -p /mnt/.snapshots
+mkdir -p /mnt/boot /mnt/home /mnt/var /mnt/.snapshots
 
 mount -o subvol=@home,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/home
 mount -o subvol=@var,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var
 mount -o subvol=@snapshots,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/.snapshots
 
-mkdir -p /mnt/var/log
-mkdir -p /mnt/var/cache/pacman/pkg
+mkdir -p /mnt/var/log /mnt/var/cache/pacman/pkg
 
 mount -o subvol=@log,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/log
 mount -o subvol=@pkg,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/cache/pacman/pkg
@@ -92,29 +88,10 @@ mount "$EFI_PART" /mnt/boot
 # Install base system
 # ------------------------------------------------------------
 pacstrap -K /mnt \
-  base \
-  linux-zen \
-  linux-zen-headers \
-  linux-firmware \
-  amd-ucode \
-  sudo \
-  nano \
-  networkmanager \
-  plasma \
-  kde-applications \
-  sddm \
-  xorg-xwayland \
-  mesa \
-  vulkan-icd-loader \
-  libglvnd \
-  egl-wayland \
-  egl-gbm \
-  git \
-  base-devel \
-  nvidia-dkms \
-  nvidia-utils \
-  lib32-nvidia-utils \
-  opencl-nvidia
+  base linux-zen linux-zen-headers linux-firmware amd-ucode \
+  sudo nano networkmanager plasma kde-applications sddm \
+  xorg-xwayland mesa vulkan-icd-loader libglvnd egl-wayland egl-gbm \
+  git base-devel nvidia-dkms nvidia-utils lib32-nvidia-utils opencl-nvidia
 
 genfstab -U /mnt > /mnt/etc/fstab
 
