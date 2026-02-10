@@ -17,18 +17,9 @@ ROOT_PASSWORD="456"
 USER_PASSWORD="123"
 
 # ------------------------------------------------------------
-# Enable multilib + refresh mirrors
+# Enable multilib and refresh mirrors
 # ------------------------------------------------------------
 sed -i 's|^#
-
-\[multilib\]
-
-|
-
-\[multilib\]
-
-|' /etc/pacman.conf
-sed -i 's|^
 
 \[multilib\]
 
