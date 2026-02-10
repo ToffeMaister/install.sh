@@ -2,8 +2,8 @@
 set -euo pipefail
 
 DISK="/dev/nvme0n1"
-EFI_PART="/dev/nvme0n1p1"
-ROOT_PART="/dev/nvme0n1p2"
+EFI_PART="${DISK}p1"
+ROOT_PART="${DISK}p2"
 
 HOSTNAME="overlord"
 USERNAME="toffe"
@@ -17,35 +17,17 @@ ROOT_PASSWORD="456"
 USER_PASSWORD="123"
 
 # ------------------------------------------------------------
-# Enable multilib and refresh mirrors
-# ------------------------------------------------------------
-sed -i 's|^#
-
-\[multilib\]
-
-|
-
-\[multilib\]
-
-|' /etc/pacman.conf
-sed -i 's|^#Include = /etc/pacman.d/mirrorlist|Include = /etc/pacman.d/mirrorlist|' /etc/pacman.conf
-
-pacman -Syy --noconfirm
-
-# ------------------------------------------------------------
 # UEFI check
 # ------------------------------------------------------------
-[ -d /sys/firmware/efi/efivars ] || exit 1
+[[ -d /sys/firmware/efi/efivars ]] || { echo "UEFI required"; exit 1; }
 
 # ------------------------------------------------------------
-# Partition disk
+# Disk partitioning
 # ------------------------------------------------------------
 wipefs -a "$DISK"
 sgdisk --zap-all "$DISK"
-
 sgdisk -n 1:0:+1G -t 1:ef00 -c 1:"EFI" "$DISK"
 sgdisk -n 2:0:0   -t 2:8300 -c 2:"ROOT" "$DISK"
-
 partprobe "$DISK"
 sleep 1
 
@@ -53,50 +35,66 @@ mkfs.fat -F32 -n "$EFI_LABEL" "$EFI_PART"
 mkfs.btrfs -f -L "$ROOT_LABEL" "$ROOT_PART"
 
 # ------------------------------------------------------------
-# Create Btrfs subvolumes
+# Btrfs subvolumes
 # ------------------------------------------------------------
 mount "$ROOT_PART" /mnt
-
-btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
-btrfs subvolume create /mnt/@var
-btrfs subvolume create /mnt/@log
-btrfs subvolume create /mnt/@pkg
-btrfs subvolume create /mnt/@snapshots
-
+for sv in @ @home @var @log @pkg @snapshots; do
+  btrfs subvolume create "/mnt/$sv"
+done
 umount /mnt
 
 # ------------------------------------------------------------
-# Mount filesystems
+# Mount layout (CORRECT ORDER)
 # ------------------------------------------------------------
-mount -o subvol=@,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt
+mount -o subvol=@,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt
+mkdir -p /mnt/{boot,home,var,.snapshots}
 
-mkdir -p /mnt/boot /mnt/home /mnt/var /mnt/.snapshots
+mount -o subvol=@home,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt/home
+mount -o subvol=@var,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt/var
+mount -o subvol=@snapshots,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt/.snapshots
 
-mount -o subvol=@home,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/home
-mount -o subvol=@var,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var
-mount -o subvol=@snapshots,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/.snapshots
+# Create directories INSIDE @var
+mkdir -p /mnt/var/log
+mkdir -p /mnt/var/cache/pacman/pkg
 
-mkdir -p /mnt/var/log /mnt/var/cache/pacman/pkg
-
-mount -o subvol=@log,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/log
-mount -o subvol=@pkg,compress=zstd,noatime,ssd,space_cache=v2,discard=async "$ROOT_PART" /mnt/var/cache/pacman/pkg
+mount -o subvol=@log,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt/var/log
+mount -o subvol=@pkg,compress=zstd,noatime,ssd,discard=async "$ROOT_PART" /mnt/var/cache/pacman/pkg
 
 mount "$EFI_PART" /mnt/boot
 
 # ------------------------------------------------------------
-# Install base system
+# Base system
 # ------------------------------------------------------------
 pacstrap -K /mnt \
   base linux-zen linux-zen-headers linux-firmware amd-ucode \
-  sudo nano networkmanager plasma kde-applications sddm \
-  xorg-xwayland mesa vulkan-icd-loader libglvnd egl-wayland egl-gbm \
-  git base-devel nvidia-dkms nvidia-utils lib32-nvidia-utils opencl-nvidia
+  sudo nano git mkinitcpio iptables-nft
 
+# ------------------------------------------------------------
+# Enable multilib
+# ------------------------------------------------------------
+cat >> /mnt/etc/pacman.conf <<EOF
+
+[multilib]
+Include = /etc/pacman.d/mirrorlist
+EOF
+
+arch-chroot /mnt pacman -Syy --noconfirm
+
+# ------------------------------------------------------------
+# Desktop + NVIDIA
+# ------------------------------------------------------------
+arch-chroot /mnt pacman -S --noconfirm \
+  networkmanager sddm plasma kde-applications \
+  xorg-xwayland mesa libglvnd egl-wayland egl-gbm \
+  base-devel nvidia-dkms nvidia-utils lib32-nvidia-utils opencl-nvidia
+
+# ------------------------------------------------------------
+# fstab
+# ------------------------------------------------------------
 genfstab -U /mnt > /mnt/etc/fstab
 
 # ------------------------------------------------------------
-# Configure system
+# System configuration
 # ------------------------------------------------------------
 arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
@@ -104,10 +102,9 @@ set -euo pipefail
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
-sed -i "s/^#\\($LOCALE\\)/\\1/" /etc/locale.gen
+echo "$LOCALE UTF-8" > /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
-
 echo "KEYMAP=sv-latin1" > /etc/vconsole.conf
 
 echo "$HOSTNAME" > /etc/hostname
@@ -119,7 +116,6 @@ HOSTS
 
 systemctl enable NetworkManager
 systemctl enable sddm
-systemctl enable btrfs-scrub@-.timer
 
 useradd -m -G wheel -s /bin/bash "$USERNAME"
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
@@ -127,11 +123,6 @@ chmod 0440 /etc/sudoers.d/wheel
 
 echo "root:$ROOT_PASSWORD" | chpasswd
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
-
-cat > /etc/modprobe.d/blacklist-nouveau.conf <<NOUVEAU
-blacklist nouveau
-options nouveau modeset=0
-NOUVEAU
 
 cat > /etc/modprobe.d/nvidia.conf <<NVIDIA
 options nvidia_drm modeset=1
@@ -161,4 +152,6 @@ options root=LABEL=$ROOT_LABEL rw nvidia_drm.modeset=1
 ENTRY
 EOF
 
-echo "Installation complete. Reboot."
+echo "Installation complete."
+echo "After first boot, enable Btrfs scrub:"
+echo "  sudo systemctl enable btrfs-scrub@-.timer"
